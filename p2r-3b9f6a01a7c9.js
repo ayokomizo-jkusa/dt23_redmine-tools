@@ -7,11 +7,17 @@
  */
 (function () {
   try {
+    /* ======= BUILD / META ======= */
+    const BUILD_STAMP = '2025-09-25 11:00:00Z'; // ← ★更新のたびに書き替えてください
+    const NOW_ISO = new Date().toISOString();
+    console.log('%c[p2r] loaded','color:#0b8;font-weight:bold',
+      { build: BUILD_STAMP, loadedAt: NOW_ISO, href: location.href });
+
     /* ===== CONFIG ===== */
     const SELECTORS = {
       subject: '#issue_subject',
-      issuedDate: '#issue_custom_field_values_15',     // <- Issued Date field
-      location:  '#issue_custom_field_values_location' // <- CHANGE THIS to your Location field selector (e.g. '#issue_custom_field_values_16')
+      issuedDate: '#issue_custom_field_values_15',     // <- Issued Date field in your Redmine
+      location:  '#issue_custom_field_values_location' // <- CHANGE to your Location field selector (e.g. '#issue_custom_field_values_16')
     };
     const FILENAME_REPLACE_UNDERSCORE_TO_SLASH = false; // true if "QRT1234_56" -> "QRT1234/56"
 
@@ -42,22 +48,16 @@
     // Set select/input by trying option text / value matches
     function setSelectByTextOrValue(el, targetText) {
       if (!el) return false;
-      const val = String(targetText).trim().toLowerCase();
-      // If it's a <select>, try to match options
+      const val = String(targetText ?? '').trim().toLowerCase();
       if (el.tagName === 'SELECT') {
         const opts = Array.from(el.options || []);
-        // 1) exact text
         let hit = opts.find(o => (o.text||'').trim().toLowerCase() === val);
-        // 2) contains text
         if (!hit) hit = opts.find(o => (o.text||'').toLowerCase().includes(val));
-        // 3) exact value
         if (!hit) hit = opts.find(o => String(o.value||'').toLowerCase() === val);
-        // 4) contains value
         if (!hit) hit = opts.find(o => String(o.value||'').toLowerCase().includes(val));
         if (hit) { el.value = hit.value; el.dispatchEvent(new Event('change', {bubbles:true})); return true; }
         return false;
       }
-      // Otherwise set as text input
       try { el.value = targetText; el.dispatchEvent(new Event('input', {bubbles:true})); return true; } catch { return false; }
     }
 
@@ -75,6 +75,7 @@
       if (window.pdfjsLib) return;
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js');
       await loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js');
+      console.log('%c[p2r] pdf.js loaded','color:#0b8');
     }
 
     async function readPdfTextFromFile(file) {
@@ -87,6 +88,7 @@
         const c = await p.getTextContent();
         text += c.items.map((it) => it.str).join('\n') + '\n';
       }
+      console.log('%c[p2r] PDF text extracted','color:#0b8', { bytes: buf.byteLength, pages: pdf.numPages });
       return text;
     }
 
@@ -116,15 +118,9 @@
       }
 
       const mdy = raw.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
-      if (mdy) {
-        const y = mdy[3], m = mdy[1].padStart(2,'0'), d = mdy[2].padStart(2,'0');
-        return `${y}-${m}-${d}`;
-      }
+      if (mdy) { const y = mdy[3], m = mdy[1].padStart(2,'0'), d = mdy[2].padStart(2,'0'); return `${y}-${m}-${d}`; }
       const ymd = raw.match(/(\d{4})[-\/\.](\d{1,2})[-\/\.](\d{1,2})/);
-      if (ymd) {
-        const y = ymd[1], m = ymd[2].padStart(2,'0'), d = ymd[3].padStart(2,'0');
-        return `${y}-${m}-${d}`;
-      }
+      if (ymd) { const y = ymd[1], m = ymd[2].padStart(2,'0'), d = ymd[3].padStart(2,'0'); return `${y}-${m}-${d}`; }
 
       return null;
     }
@@ -148,33 +144,24 @@
       if (!lm) return null;
       const raw = lm[1].trim();
 
-      // Try to find a 3-digit code
       const codeMatch = raw.match(/\b(\d{3})\b/);
       if (codeMatch) {
         const code = codeMatch[1];
         const label = LOCATION_MAP[code] || null;
         if (label) return { code, label };
       }
-
-      // Otherwise try to match by label text
       const rawLower = raw.toLowerCase();
-      let best = null;
       for (const [code, label] of Object.entries(LOCATION_MAP)) {
-        if (rawLower.includes(label.toLowerCase())) {
-          best = { code, label };
-          break;
-        }
+        if (rawLower.includes(label.toLowerCase())) return { code, label };
       }
-      return best; // may be null
+      return null;
     }
 
     /* ===== Batch panel (open next tabs by clicks) ===== */
     const PANEL_ID = 'p2r_panel_v2';
     const STASH_KEY = 'p2r_stash_v2';
 
-    const getStash = () => {
-      try { return JSON.parse(localStorage.getItem(STASH_KEY) || 'null'); } catch { return null; }
-    };
+    const getStash = () => { try { return JSON.parse(localStorage.getItem(STASH_KEY) || 'null'); } catch { return null; } };
     const setStash = (o) => localStorage.setItem(STASH_KEY, JSON.stringify(o));
     const clearStash = () => localStorage.removeItem(STASH_KEY);
 
@@ -246,12 +233,9 @@
           if (locationObj) {
             const locEl = d.querySelector(SELECTORS.location);
             if (locEl) {
-              // try label first; fallback to code; finally raw label text
-              const tried =
-                setSelectByTextOrValue(locEl, locationObj.label) ||
-                setSelectByTextOrValue(locEl, locationObj.code)  ||
-                setSelectByTextOrValue(locEl, (locationObj.label||''));
-              // nothing else to do if not matched
+              setSelectByTextOrValue(locEl, locationObj.label) ||
+              setSelectByTextOrValue(locEl, locationObj.code)  ||
+              setSelectByTextOrValue(locEl, (locationObj.label||''));
             }
           }
 
@@ -259,6 +243,7 @@
         } catch (_) { /* wait same-origin */ }
         if (tick > 600) clearInterval(iv);
       }, 50);
+      console.log('%c[p2r] opened tab','color:#0b8', { subject, issuedDate, location: locationObj?.label || locationObj?.code || null });
     }
 
     /* ===== Main ===== */
@@ -289,8 +274,9 @@
       try {
         const text = await readPdfTextFromFile(file);
         issuedDate = parseSentDate(text);
-        locationObj = parseLocation(text); // { code, label } or null
-      } catch (e) { console.warn('PDF parse skipped:', e.message); }
+        locationObj = parseLocation(text);
+        console.log('%c[p2r] parsed','color:#0b8', { issuedDate, location: locationObj });
+      } catch (e) { console.warn('[p2r] PDF parse skipped:', e.message); }
 
       // Ask LOT
       let lot = parseInt(prompt('Enter LOT QTY (default=1)', '1') || '1', 10);
@@ -318,10 +304,6 @@
           setSelectByTextOrValue(locEl, locationObj.code)  ||
           setSelectByTextOrValue(locEl, (locationObj.label||''));
         }
-      } else {
-        // Optional: ask user if not parsed
-        // const manualLoc = prompt('Could not determine LOCATION. Enter location label or code:', '');
-        // if (manualLoc) { const locEl = $(SELECTORS.location); if (locEl) setSelectByTextOrValue(locEl, manualLoc); }
       }
 
       // Save batch state & show panel
@@ -329,6 +311,8 @@
       setStash(stash);
       renderPanel(stash);
       toast('Filled Subject in this tab (#1). Use the bottom-right panel to open the next tabs.');
+
+      console.log('%c[p2r] ready','color:#0b8', { lot, firstSubject: subEl.value, issuedDate, location: locationObj });
     });
   } catch (e) {
     alert('Error: ' + e.message);
