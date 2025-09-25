@@ -1,6 +1,7 @@
 /* Redmine helper (no-API)
  * - Subject from PDF filename (optionally "_"->"/")
  * - Issued Date <- "Sent:" date found in the PDF (Outlook-style header)
+ * - Location <- PDF "LOCATION:" (supports code-only like "058")
  * - LOT-by-LOT: fill #1 in current tab, then open next tabs on button clicks
  * UI: English
  */
@@ -9,9 +10,18 @@
     /* ===== CONFIG ===== */
     const SELECTORS = {
       subject: '#issue_subject',
-      issuedDate: '#issue_custom_field_values_15' // <- Issued Date field in your Redmine
+      issuedDate: '#issue_custom_field_values_15',     // <- Issued Date field
+      location:  '#issue_custom_field_values_location' // <- CHANGE THIS to your Location field selector (e.g. '#issue_custom_field_values_16')
     };
     const FILENAME_REPLACE_UNDERSCORE_TO_SLASH = false; // true if "QRT1234_56" -> "QRT1234/56"
+
+    // Code -> Label map for Location (expand as needed)
+    const LOCATION_MAP = {
+      '004': 'Cleveland Truck Plant, Cleveland, NC',
+      '013': 'Saltillo Truck Plant, Saltillo, MX',
+      '017': 'Mt. Holly Truck Plant, Mt. Holly, NC',
+      '058': 'Toluca, MX'
+    };
 
     /* ===== Utilities ===== */
     const $ = (sel, root = document) => root.querySelector(sel);
@@ -28,6 +38,28 @@
         throw new Error('Subject field not found');
       }
     };
+
+    // Set select/input by trying option text / value matches
+    function setSelectByTextOrValue(el, targetText) {
+      if (!el) return false;
+      const val = String(targetText).trim().toLowerCase();
+      // If it's a <select>, try to match options
+      if (el.tagName === 'SELECT') {
+        const opts = Array.from(el.options || []);
+        // 1) exact text
+        let hit = opts.find(o => (o.text||'').trim().toLowerCase() === val);
+        // 2) contains text
+        if (!hit) hit = opts.find(o => (o.text||'').toLowerCase().includes(val));
+        // 3) exact value
+        if (!hit) hit = opts.find(o => String(o.value||'').toLowerCase() === val);
+        // 4) contains value
+        if (!hit) hit = opts.find(o => String(o.value||'').toLowerCase().includes(val));
+        if (hit) { el.value = hit.value; el.dispatchEvent(new Event('change', {bubbles:true})); return true; }
+        return false;
+      }
+      // Otherwise set as text input
+      try { el.value = targetText; el.dispatchEvent(new Event('input', {bubbles:true})); return true; } catch { return false; }
+    }
 
     /* ===== Lazy-load pdf.js and read text ===== */
     const loadScript = (src) =>
@@ -58,56 +90,49 @@
       return text;
     }
 
-    /* ===== Parse "Sent:" date =====
-     * Accepts typical Outlook-like lines:
-     *   Sent: Thursday, September 18, 2025 11:15 AM
-     *   Sent: Mon, Sep 18, 2025 11:15 AM
-     * Returns YYYY-MM-DD
-     */
+    /* ===== Parse "Sent:" date -> YYYY-MM-DD ===== */
     function parseSentDate(pdfText) {
-      // Wide regex capturing everything after "Sent:" to end-of-line
-      const m = pdfText.match(/^\s*Sent:\s*(.+)$/im);
+      const m = pdfText.match(/^\s*Sent\s*:?\s*(.+)$/im);
       if (!m) return null;
       const raw = m[1].trim();
 
-      // Try native Date first
-      const d1 = new Date(raw);
-      if (!isNaN(d1.getTime())) return fmtDate(d1);
+      const dNative = new Date(raw);
+      if (!isNaN(dNative.getTime())) return fmtDate(dNative);
 
-      // Manual parse: Day, Month DD, YYYY HH:MM AM/PM  (allow short month)
-      const re = /^(?:[A-Za-z]+,?\s+)?([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})\s+(\d{1,2}):(\d{2})\s*([AP]M)$/i;
-      const m2 = raw.match(re);
+      const re1 = /^(?:[A-Za-z]+,?\s+)?([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})\s+(\d{1,2}):(\d{2})\s*([AP]M)(?:\s*[A-Z]{2,5})?$/i;
+      const m1 = raw.match(re1);
+      if (m1) {
+        const mon = monthToNum(m1[1]); if (!mon) return null;
+        const day = +m1[2], year = +m1[3]; let hh = +m1[4]; const mm = +m1[5]; const ap = m1[6].toUpperCase();
+        if (ap === 'PM' && hh < 12) hh += 12; if (ap === 'AM' && hh === 12) hh = 0;
+        const d = new Date(year, mon - 1, day, hh, mm, 0); if (!isNaN(d.getTime())) return fmtDate(d);
+      }
+
+      const re2 = /^(?:[A-Za-z]{3},\s*)?(\d{1,2})\s+([A-Za-z]{3,})\s+(\d{4})\s+(\d{1,2}):(\d{2})(?::\d{2})?\s*(?:[A-Z]{1,5}|[+\-]\d{2}:?\d{2})?$/i;
+      const m2 = raw.match(re2);
       if (m2) {
-        const monthMap = {
-          jan:1,feb:2,mar:3,apr:4,may:5,jun:6,
-          jul:7,aug:8,sep:9,sept:9,oct:10,nov:11,dec:12
-        };
-        const mon = monthMap[m2[1].toLowerCase().slice(0,4)] || monthMap[m2[1].toLowerCase().slice(0,3)];
-        const day = parseInt(m2[2], 10);
-        const year = parseInt(m2[3], 10);
-        let hh = parseInt(m2[4], 10);
-        const mm = parseInt(m2[5], 10);
-        const ampm = m2[6].toUpperCase();
-        if (ampm === 'PM' && hh < 12) hh += 12;
-        if (ampm === 'AM' && hh === 12) hh = 0;
-        if (!mon || day < 1 || day > 31) return null;
-        const d = new Date(year, mon - 1, day, hh, mm, 0);
-        if (isNaN(d.getTime())) return null;
-        return fmtDate(d);
+        const day = +m2[1]; const mon = monthToNum(m2[2]); const year = +m2[3]; const hh = +m2[4]; const mm = +m2[5];
+        if (mon) { const d = new Date(year, mon - 1, day, hh, mm, 0); if (!isNaN(d.getTime())) return fmtDate(d); }
       }
 
-      // Last resort: look for simple YYYY-MM-DD / MM/DD/YYYY on the same line
-      const ymd = raw.match(/(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})/);
-      if (ymd) {
-        const y = ymd[1], mth = ymd[2].padStart(2,'0'), dy = ymd[3].padStart(2,'0');
-        return `${y}-${mth}-${dy}`;
-      }
       const mdy = raw.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
       if (mdy) {
-        const y = mdy[3], mth = mdy[1].padStart(2,'0'), dy = mdy[2].padStart(2,'0');
-        return `${y}-${mth}-${dy}`;
+        const y = mdy[3], m = mdy[1].padStart(2,'0'), d = mdy[2].padStart(2,'0');
+        return `${y}-${m}-${d}`;
       }
+      const ymd = raw.match(/(\d{4})[-\/\.](\d{1,2})[-\/\.](\d{1,2})/);
+      if (ymd) {
+        const y = ymd[1], m = ymd[2].padStart(2,'0'), d = ymd[3].padStart(2,'0');
+        return `${y}-${m}-${d}`;
+      }
+
       return null;
+    }
+
+    function monthToNum(m) {
+      const k = m.toLowerCase().slice(0,4);
+      const map = { jan:1, janu:1, feb:2, mar:3, apr:4, may:5, jun:6, july:7, jul:7, aug:8, sep:9, sept:9, oct:10, nov:11, dec:12 };
+      return map[k] || map[m.toLowerCase().slice(0,3)] || null;
     }
 
     function fmtDate(d) {
@@ -115,6 +140,32 @@
       const mm = String(d.getMonth() + 1).padStart(2, '0');
       const dd = String(d.getDate()).padStart(2, '0');
       return `${yyyy}-${mm}-${dd}`;
+    }
+
+    /* ===== Parse "LOCATION:" -> { code, label } ===== */
+    function parseLocation(pdfText) {
+      const lm = pdfText.match(/^\s*LOCATION\s*:?\s*(.+)$/im);
+      if (!lm) return null;
+      const raw = lm[1].trim();
+
+      // Try to find a 3-digit code
+      const codeMatch = raw.match(/\b(\d{3})\b/);
+      if (codeMatch) {
+        const code = codeMatch[1];
+        const label = LOCATION_MAP[code] || null;
+        if (label) return { code, label };
+      }
+
+      // Otherwise try to match by label text
+      const rawLower = raw.toLowerCase();
+      let best = null;
+      for (const [code, label] of Object.entries(LOCATION_MAP)) {
+        if (rawLower.includes(label.toLowerCase())) {
+          best = { code, label };
+          break;
+        }
+      }
+      return best; // may be null
     }
 
     /* ===== Batch panel (open next tabs by clicks) ===== */
@@ -159,7 +210,7 @@
       btn.onclick = () => {
         const i = stash.done + 1;
         const subject = stash.total > 1 ? `${stash.base} (#${i}/${stash.total})` : stash.base;
-        openAndFill(stash.url, subject, stash.issuedDate, () => {
+        openAndFill(stash.url, subject, stash.issuedDate, stash.location, () => {
           stash.done++;
           setStash(stash);
           renderPanel(stash);
@@ -171,7 +222,7 @@
       p.appendChild(close);
     }
 
-    function openAndFill(url, subject, issuedDate, doneCb) {
+    function openAndFill(url, subject, issuedDate, locationObj, doneCb) {
       const w = window.open(url, '_blank');
       if (!w) { alert('Popup was blocked. Please allow popups for this site.'); return; }
       let tick = 0;
@@ -181,12 +232,27 @@
           if (!w || w.closed) { clearInterval(iv); return; }
           const d = w.document; if (!d) return;
 
+          // Subject
           const sub = d.querySelector(SELECTORS.subject);
           if (sub) sub.value = subject;
 
+          // Issued Date
           if (issuedDate) {
             const issued = d.querySelector(SELECTORS.issuedDate);
-            if (issued) { try { issued.value = issuedDate; } catch {} }
+            if (issued) { try { issued.value = issuedDate; issued.dispatchEvent(new Event('change', {bubbles:true})); } catch {} }
+          }
+
+          // Location
+          if (locationObj) {
+            const locEl = d.querySelector(SELECTORS.location);
+            if (locEl) {
+              // try label first; fallback to code; finally raw label text
+              const tried =
+                setSelectByTextOrValue(locEl, locationObj.label) ||
+                setSelectByTextOrValue(locEl, locationObj.code)  ||
+                setSelectByTextOrValue(locEl, (locationObj.label||''));
+              // nothing else to do if not matched
+            }
           }
 
           if (sub) { clearInterval(iv); doneCb && doneCb(); }
@@ -202,7 +268,7 @@
     const cont = getStash();
     if (cont && cont.total > cont.done) { renderPanel(cont); return; }
 
-    // First run: choose PDF -> parse Sent date -> ask LOT -> fill #1 -> panel
+    // First run: choose PDF -> parse fields -> ask LOT -> fill #1 -> panel
     const pickFile = () => new Promise((resolve) => {
       const i = document.createElement('input');
       i.type = 'file'; i.accept = 'application/pdf';
@@ -217,11 +283,13 @@
       let base = file.name.replace(/\.pdf$/i, '');
       if (FILENAME_REPLACE_UNDERSCORE_TO_SLASH) base = base.replace('_', '/');
 
-      // Parse "Sent:" date from PDF text -> Issued Date
+      // Parse from PDF text
       let issuedDate = null;
+      let locationObj = null;
       try {
         const text = await readPdfTextFromFile(file);
         issuedDate = parseSentDate(text);
+        locationObj = parseLocation(text); // { code, label } or null
       } catch (e) { console.warn('PDF parse skipped:', e.message); }
 
       // Ask LOT
@@ -229,20 +297,35 @@
       if (!(lot > 0)) lot = 1;
 
       // Fill current tab (#1)
-      const subjectInput = $(SELECTORS.subject);
-      if (!subjectInput) { alert('Subject field not found.'); return; }
-      subjectInput.value = lot > 1 ? `${base} (#1/${lot})` : base;
+      const subEl = $(SELECTORS.subject);
+      if (!subEl) { alert('Subject field not found.'); return; }
+      subEl.value = lot > 1 ? `${base} (#1/${lot})` : base;
 
+      // Issued Date
       if (issuedDate) {
         const issued = $(SELECTORS.issuedDate);
-        if (issued) { try { issued.value = issuedDate; } catch {} }
+        if (issued) { try { issued.value = issuedDate; issued.dispatchEvent(new Event('change', {bubbles:true})); } catch {} }
       } else {
         const manual = prompt('Could not find "Sent:" date in the PDF. Enter Issued Date (YYYY-MM-DD) or leave blank:', '');
         if (manual) { const issued = $(SELECTORS.issuedDate); if (issued) issued.value = manual; }
       }
 
+      // Location
+      if (locationObj) {
+        const locEl = $(SELECTORS.location);
+        if (locEl) {
+          setSelectByTextOrValue(locEl, locationObj.label) ||
+          setSelectByTextOrValue(locEl, locationObj.code)  ||
+          setSelectByTextOrValue(locEl, (locationObj.label||''));
+        }
+      } else {
+        // Optional: ask user if not parsed
+        // const manualLoc = prompt('Could not determine LOCATION. Enter location label or code:', '');
+        // if (manualLoc) { const locEl = $(SELECTORS.location); if (locEl) setSelectByTextOrValue(locEl, manualLoc); }
+      }
+
       // Save batch state & show panel
-      const stash = { base, total: lot, done: 1, url: location.href, issuedDate };
+      const stash = { base, total: lot, done: 1, url: location.href, issuedDate, location: locationObj };
       setStash(stash);
       renderPanel(stash);
       toast('Filled Subject in this tab (#1). Use the bottom-right panel to open the next tabs.');
