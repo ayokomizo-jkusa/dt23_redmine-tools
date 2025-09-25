@@ -1,23 +1,32 @@
 /* Redmine helper (no-API)
  * - Subject from PDF filename (optionally "_"->"/")
- * - Issued Date <- "Sent:" date found in the PDF (Outlook-style header)
- * - Location <- PDF "LOCATION:" (supports code-only like "058")
+ * - Issued Date <- "Sent:" line in PDF (YYYY-MM-DD)
+ * - Issuer      <- "NAME:" line in PDF (raw text)
+ * - Location    <- "LOCATION:" line in PDF (supports code-only like "058")
+ * - Attachment  <- selected PDF auto-attached on current & next tabs (best-effort)
  * - LOT-by-LOT: fill #1 in current tab, then open next tabs on button clicks
  * UI: English
  */
 (function () {
   try {
     /* ======= META ======= */
-    const NOW_ISO = new Date().toISOString();
-    console.log('%c[p2r] script loaded', 'color:#0b8;font-weight:bold', { loadedAt: NOW_ISO, href: location.href });
+    console.log('%c[p2r] script loaded', 'color:#0b8;font-weight:bold', { loadedAt: new Date().toISOString(), href: location.href });
 
-    /* ===== CONFIG ===== */
+    /* ===== CONFIG (adjust selectors to your Redmine) ===== */
     const SELECTORS = {
       subject:    '#issue_subject',
-      issuedDate: '#issue_custom_field_values_15', // <- Issued Date field
-      location:   '#issue_custom_field_values_25'  // <- Location field (select or input)
+      issuedDate: '#issue_custom_field_values_15', // Issued Date (type=date or text)
+      location:   '#issue_custom_field_values_25', // Location (<select> or <input>)
+      issuer:     '#issue_custom_field_values_issuer' // ← Issuerのフィールド。実環境のIDに置換推奨
+                                                      // 例) '#issue_custom_field_values_26' や 'input[name="issue[custom_field_values][26]"]'
     };
-    const FILENAME_REPLACE_UNDERSCORE_TO_SLASH = false; // true if "QRT1234_56" -> "QRT1234/56"
+    const ATTACH_SELECTORS = [
+      'input[type="file"][name^="attachments"]',
+      '#attachments_fields input[type="file"]',
+      '#attachments_form input[type="file"]',
+      'input[type="file"][id^="attachments"]'
+    ];
+    const FILENAME_REPLACE_UNDERSCORE_TO_SLASH = false; // true -> "_" becomes "/"
 
     // Code -> Label map for Location (extend as needed)
     const LOCATION_MAP = {
@@ -75,6 +84,32 @@
       }
     }
 
+    // Try best-effort to find an Issuer input if explicit selector misses
+    function findIssuerField(doc) {
+      let el = doc.querySelector(SELECTORS.issuer);
+      if (el) return el;
+      el = doc.querySelector('input[id*="issuer" i], textarea[id*="issuer" i], input[name*="[issuer]" i], textarea[name*="[issuer]" i]');
+      return el || null;
+    }
+
+    // Attach a File object into first matching file input
+    function attachFileInto(doc, file) {
+      if (!file) return false;
+      const input = ATTACH_SELECTORS.map(sel => doc.querySelector(sel)).find(Boolean);
+      if (!input) return false;
+      try {
+        const dt = new DataTransfer();
+        dt.items.add(file);
+        input.files = dt.files; // may fail on some hardened setups
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        console.log('%c[p2r] attachment set', 'color:#0b8', { name: file.name, bytes: file.size });
+        return true;
+      } catch (e) {
+        console.warn('[p2r] attach failed:', e.message);
+        return false;
+      }
+    }
+
     /* ===== Lazy-load pdf.js and read text ===== */
     const loadScript = (src) =>
       new Promise((res, rej) => {
@@ -108,16 +143,13 @@
 
     /* ===== Parse "Sent:" date -> YYYY-MM-DD ===== */
     function parseSentDate(pdfText) {
-      // get the line after "Sent:"
       const m = pdfText.match(/^\s*Sent\s*:?\s*(.+)$/im);
       if (!m) return null;
       const raw = m[1].trim();
 
-      // native Date()
       const dNative = new Date(raw);
       if (!isNaN(dNative.getTime())) return fmtDate(dNative);
 
-      // Month DD, YYYY HH:MM AM/PM  (dow optional)
       const re1 = /^(?:[A-Za-z]+,?\s+)?([A-Za-z]+)\s+(\d{1,2}),\s*(\d{4})\s+(\d{1,2}):(\d{2})\s*([AP]M)(?:\s*[A-Z]{2,5})?$/i;
       const m1 = raw.match(re1);
       if (m1) {
@@ -129,7 +161,6 @@
         if (!isNaN(d.getTime())) return fmtDate(d);
       }
 
-      // RFC-ish: Thu, 18 Sep 2025 11:15:00 +0000
       const re2 = /^(?:[A-Za-z]{3},\s*)?(\d{1,2})\s+([A-Za-z]{3,})\s+(\d{4})\s+(\d{1,2}):(\d{2})(?::\d{2})?\s*(?:[A-Z]{1,5}|[+\-]\d{2}:?\d{2})?$/i;
       const m2 = raw.match(re2);
       if (m2) {
@@ -140,15 +171,19 @@
         }
       }
 
-      // MM/DD/YYYY (time optional)
       const mdy = raw.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
       if (mdy) return `${mdy[3]}-${mdy[1].padStart(2,'0')}-${mdy[2].padStart(2,'0')}`;
-
-      // YYYY-MM-DD (time optional)
       const ymd = raw.match(/(\d{4})[-\/\.](\d{1,2})[-\/\.](\d{1,2})/);
       if (ymd) return `${ymd[1]}-${ymd[2].padStart(2,'0')}-${ymd[3].padStart(2,'0')}`;
 
       return null;
+    }
+
+    /* ===== Parse "NAME:" -> Issuer (raw text) ===== */
+    function parseIssuer(pdfText) {
+      const m = pdfText.match(/^\s*NAME\s*:?\s*(.+)$/im);
+      if (!m) return null;
+      return m[1].trim();
     }
 
     function monthToNum(m) {
@@ -226,7 +261,7 @@
       btn.onclick = () => {
         const i = stash.done + 1;
         const subject = stash.total > 1 ? `${stash.base} (#${i}/${stash.total})` : stash.base;
-        openAndFill(stash.url, subject, stash.issuedDate, stash.location, () => {
+        openAndFill(stash.url, subject, stash.issuedDate, stash.location, stash.issuer, stash.file, () => {
           stash.done++;
           setStash(stash);
           renderPanel(stash);
@@ -239,7 +274,7 @@
     }
 
     /* ===== Open a new tab and fill fields ===== */
-    function openAndFill(url, subject, issuedDate, locationObj, doneCb) {
+    function openAndFill(url, subject, issuedDate, locationObj, issuerName, fileObj, doneCb) {
       const w = window.open(url, '_blank');
       if (!w) { alert('Popup was blocked. Please allow popups for this site.'); return; }
       let tick = 0;
@@ -255,8 +290,8 @@
 
           // Issued Date
           if (issuedDate) {
-            const issued = d.querySelector(SELECTORS.issuedDate);
-            if (issued) { try { issued.value = issuedDate; issued.dispatchEvent(new Event('change', {bubbles:true})); } catch {} }
+            const el = d.querySelector(SELECTORS.issuedDate);
+            if (el) { try { el.value = issuedDate; el.dispatchEvent(new Event('change', {bubbles:true})); } catch {} }
           }
 
           // Location
@@ -269,6 +304,17 @@
             }
           }
 
+          // Issuer
+          if (issuerName) {
+            const issuerEl = findIssuerField(d);
+            if (issuerEl) { try { issuerEl.value = issuerName; issuerEl.dispatchEvent(new Event('input', {bubbles:true})); } catch {} }
+          }
+
+          // Attachment
+          if (fileObj) {
+            attachFileInto(d, fileObj);
+          }
+
           if (sub) { clearInterval(iv); doneCb && doneCb(); }
         } catch (_) { /* wait same-origin */ }
         if (tick > 600) clearInterval(iv);
@@ -277,7 +323,9 @@
       console.log('%c[p2r] opened tab', 'color:#0b8', {
         subject,
         issuedDate,
-        location: locationObj?.label || locationObj?.code || null
+        issuer: issuerName || null,
+        location: locationObj?.label || locationObj?.code || null,
+        attach: !!fileObj
       });
     }
 
@@ -289,14 +337,11 @@
     if (cont && cont.total > cont.done) { renderPanel(cont); return; }
 
     // First run: choose PDF -> parse fields -> ask LOT -> fill #1 -> panel
-    const pickFile = () => new Promise((resolve) => {
-      const i = document.createElement('input');
-      i.type = 'file'; i.accept = 'application/pdf';
-      i.onchange = () => resolve(i.files && i.files[0]);
-      i.click();
-    });
-
-    pickFile().then(async (file) => {
+    const pickInput = document.createElement('input');
+    pickInput.type = 'file';
+    pickInput.accept = 'application/pdf';
+    pickInput.onchange = async () => {
+      const file = pickInput.files && pickInput.files[0];
       if (!file) return;
 
       // Subject base from filename
@@ -306,11 +351,13 @@
       // Parse from PDF text
       let issuedDate = null;
       let locationObj = null;
+      let issuerName = null;
       try {
         const text = await readPdfTextFromFile(file);
         issuedDate = parseSentDate(text);
         locationObj = parseLocation(text);
-        console.log('%c[p2r] parsed', 'color:#0b8', { issuedDate, location: locationObj });
+        issuerName = parseIssuer(text);
+        console.log('%c[p2r] parsed', 'color:#0b8', { issuedDate, issuerName, location: locationObj });
       } catch (e) {
         console.warn('[p2r] PDF parse skipped:', e.message);
       }
@@ -320,22 +367,26 @@
       if (!(lot > 0)) lot = 1;
 
       // Fill current tab (#1)
-      const subEl = $(SELECTORS.subject);
+      const doc = document;
+      const subEl = $(SELECTORS.subject, doc);
       if (!subEl) { alert('Subject field not found.'); return; }
       subEl.value = lot > 1 ? `${base} (#1/${lot})` : base;
 
-      // Issued Date
       if (issuedDate) {
-        const issued = $(SELECTORS.issuedDate);
-        if (issued) { try { issued.value = issuedDate; issued.dispatchEvent(new Event('change', {bubbles:true})); } catch {} }
+        const el = $(SELECTORS.issuedDate, doc);
+        if (el) { try { el.value = issuedDate; el.dispatchEvent(new Event('change', {bubbles:true})); } catch {} }
       } else {
         const manual = prompt('Could not find "Sent:" date in the PDF. Enter Issued Date (YYYY-MM-DD) or leave blank:', '');
-        if (manual) { const issued = $(SELECTORS.issuedDate); if (issued) issued.value = manual; }
+        if (manual) { const el = $(SELECTORS.issuedDate, doc); if (el) el.value = manual; }
       }
 
-      // Location
+      if (issuerName) {
+        const issuerEl = findIssuerField(doc);
+        if (issuerEl) { try { issuerEl.value = issuerName; issuerEl.dispatchEvent(new Event('input', {bubbles:true})); } catch {} }
+      }
+
       if (locationObj) {
-        const locEl = $(SELECTORS.location);
+        const locEl = $(SELECTORS.location, doc);
         if (locEl) {
           setSelectByTextOrValue(locEl, locationObj.label) ||
           setSelectByTextOrValue(locEl, locationObj.code)  ||
@@ -343,19 +394,18 @@
         }
       }
 
+      // Attachment (current tab)
+      attachFileInto(doc, file);
+
       // Save batch state & show panel
-      const stash = { base, total: lot, done: 1, url: location.href, issuedDate, location: locationObj };
+      const stash = { base, total: lot, done: 1, url: location.href, issuedDate, issuer: issuerName, location: locationObj, file };
       setStash(stash);
       renderPanel(stash);
       toast('Filled Subject in this tab (#1). Use the bottom-right panel to open the next tabs.');
 
-      console.log('%c[p2r] ready', 'color:#0b8', {
-        lot,
-        firstSubject: subEl.value,
-        issuedDate,
-        location: locationObj
-      });
-    });
+      console.log('%c[p2r] ready', 'color:#0b8', { lot, firstSubject: subEl.value, issuedDate, issuerName, location: locationObj, attached: true });
+    };
+    pickInput.click();
   } catch (e) {
     alert('Error: ' + e.message);
   }
