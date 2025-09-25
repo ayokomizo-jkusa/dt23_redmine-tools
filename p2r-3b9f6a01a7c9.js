@@ -1,9 +1,9 @@
 /* Redmine helper (no-API)
  * - Subject from PDF filename (optionally "_"->"/")
- * - Issued Date <- "Sent:" line in PDF (YYYY-MM-DD)
- * - Issuer      <- "NAME:" line in PDF (raw text)
- * - Location    <- "LOCATION:" line in PDF (supports code-only like "058")
- * - Attachment  <- attach PDF to QRT field first (by label), fallback to Files
+ * - Issued Date <- "DATE ENTERED:" (MM/DD/YY or MM/DD/YYYY) else fallback to "Sent:" (YYYY-MM-DD)
+ * - Issuer      <- "NAME:" (raw text)  -> #issue_custom_field_values_16
+ * - Location    <- "LOCATION:" (supports code-only like "058") -> #issue_custom_field_values_25
+ * - Attachment  <- attach PDF to QRT field first (by label "QRT"), fallback to Files area
  * - LOT-by-LOT: fill #1 in current tab, then open next tabs on button clicks
  * UI: English
  */
@@ -14,7 +14,7 @@
     /* ===== CONFIG ===== */
     const SELECTORS = {
       subject:    '#issue_subject',
-      issuedDate: '#issue_custom_field_values_15', // Issued Date
+      issuedDate: '#issue_custom_field_values_15', // Issued Date (Redmine側フィールド)
       location:   '#issue_custom_field_values_25', // Location
       issuer:     '#issue_custom_field_values_16'  // Issuer
     };
@@ -27,7 +27,7 @@
       'input[type="file"][id^="attachments"]'
     ];
 
-    // 「QRT」添付フィールドのラベル候補（ラベル文言に含まれていれば優先）
+    // 「QRT」添付フィールドのラベル検出キーワード
     const QRT_LABEL_KEYWORDS = ['QRT'];
 
     const FILENAME_REPLACE_UNDERSCORE_TO_SLASH = false;
@@ -42,7 +42,6 @@
 
     /* ===== Utilities ===== */
     const $ = (sel, root = document) => root.querySelector(sel);
-
     const toast = (msg) => {
       const d = document.createElement('div');
       d.style = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:999999;background:#111;color:#fff;padding:8px 12px;border-radius:8px;font:12px system-ui';
@@ -50,7 +49,6 @@
       document.body.appendChild(d);
       setTimeout(() => d.remove(), 2200);
     };
-
     const assertOnNewIssue = () => {
       if (!$(SELECTORS.subject)) {
         alert('Subject field not found. Run this on Redmine "New issue" page.');
@@ -82,33 +80,20 @@
       return el || null;
     }
 
-    /* ===== QRT attachment detection ===== */
+    /* ===== QRT attachment detection & attach ===== */
     function findQrtFileInput(doc) {
-      // 1) ラベルや説明テキストに "QRT" を含む要素近傍の file input を探す
-      const labelNodes = Array.from(doc.querySelectorAll('label, .label, th, td, span, div'));
-      const qrtNodes = labelNodes.filter(n => {
-        const t = (n.textContent || '').trim().toLowerCase();
-        return t && QRT_LABEL_KEYWORDS.some(k => t.includes(k.toLowerCase()));
-      });
+      // ラベルやセルに "QRT" を含む近傍の file input
+      const nodes = Array.from(doc.querySelectorAll('label, .label, th, td, span, div'));
+      const qrtNodes = nodes.filter(n => (n.textContent || '').toLowerCase().includes('qrt'));
       for (const n of qrtNodes) {
-        // 近傍の input[type=file]
-        // 近い順に: 同じ行/セル → 親の中 → 次兄弟 → 祖先内
-        const inSame = n.querySelector?.('input[type="file"]');
-        if (inSame) return inSame;
-        const next = n.nextElementSibling?.querySelector?.('input[type="file"]');
-        if (next) return next;
-        // 最寄りのコンテナから探索（2段上まで）
-        const p1 = n.parentElement;
-        const p2 = p1?.parentElement;
+        const inSame = n.querySelector?.('input[type="file"]'); if (inSame) return inSame;
+        const next = n.nextElementSibling?.querySelector?.('input[type="file"]'); if (next) return next;
+        const p1 = n.parentElement, p2 = p1?.parentElement;
         const cand = p1?.querySelector?.('input[type="file"]') || p2?.querySelector?.('input[type="file"]');
         if (cand) return cand;
       }
-
-      // 2) name/id に qrt を含む file input
-      const byName = doc.querySelector('input[type="file"][name*="qrt" i]') || doc.querySelector('input[type="file"][id*="qrt" i]');
-      if (byName) return byName;
-
-      return null; // 見つからなければ null
+      // name/id に qrt を含む input
+      return doc.querySelector('input[type="file"][name*="qrt" i]') || doc.querySelector('input[type="file"][id*="qrt" i]') || null;
     }
 
     function attachToInput(input, file) {
@@ -127,16 +112,14 @@
 
     function attachFilePreferQRT(doc, file) {
       if (!file) return false;
-      // QRT 優先
       const qrt = findQrtFileInput(doc);
       if (qrt) {
         const ok = attachToInput(qrt, file);
         console.log('%c[p2r] attach -> QRT', 'color:#0b8', { ok, name: file.name });
         if (ok) return true;
       }
-      // フォールバック: Files
-      const filesInput = FILES_INPUT_CANDIDATES.map(sel => doc.querySelector(sel)).find(Boolean);
-      const ok2 = attachToInput(filesInput, file);
+      const fallback = FILES_INPUT_CANDIDATES.map(sel => doc.querySelector(sel)).find(Boolean);
+      const ok2 = attachToInput(fallback, file);
       console.log('%c[p2r] attach -> Files (fallback)', 'color:#b80', { ok: ok2, name: file.name });
       return ok2;
     }
@@ -166,7 +149,21 @@
       return text;
     }
 
-    /* ===== Parsers ===== */
+    /* ===== Date parsers ===== */
+    // 1st priority: DATE ENTERED: MM/DD/YY or MM/DD/YYYY -> YYYY-MM-DD
+    function parseDateEntered(pdfText) {
+      const m = pdfText.match(/^\s*DATE\s+ENTERED\s*:?\s*(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/im);
+      if (!m) return null;
+      let mm = parseInt(m[1], 10);
+      let dd = parseInt(m[2], 10);
+      let yy = m[3];
+      if (yy.length === 2) yy = 2000 + parseInt(yy, 10);
+      else yy = parseInt(yy, 10);
+      if (isNaN(mm) || isNaN(dd) || isNaN(yy)) return null;
+      return `${yy}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
+    }
+
+    // Fallback: Sent: -> YYYY-MM-DD
     function parseSentDate(pdfText) {
       const m = pdfText.match(/^\s*Sent\s*:?\s*(.+)$/im);
       if (!m) return null;
@@ -196,6 +193,10 @@
       return null;
     }
 
+    function monthToNum(m){ const k=m.toLowerCase().slice(0,4); const map={jan:1,janu:1,feb:2,mar:3,apr:4,may:5,jun:6,july:7,jul:7,aug:8,sep:9,sept:9,oct:10,nov:11,dec:12}; return map[k]||map[m.toLowerCase().slice(0,3)]||null; }
+    function fmtDate(d){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+
+    /* ===== Other parsers ===== */
     function parseIssuer(pdfText) {
       const m = pdfText.match(/^\s*NAME\s*:?\s*(.+)$/im);
       return m ? m[1].trim() : null;
@@ -218,9 +219,6 @@
       }
       return null;
     }
-
-    function monthToNum(m){ const k=m.toLowerCase().slice(0,4); const map={jan:1,janu:1,feb:2,mar:3,apr:4,may:5,jun:6,july:7,jul:7,aug:8,sep:9,sept:9,oct:10,nov:11,dec:12}; return map[k]||map[m.toLowerCase().slice(0,3)]||null; }
-    function fmtDate(d){ return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
 
     /* ===== Batch panel ===== */
     const PANEL_ID='p2r_panel_v2'; const STASH_KEY='p2r_stash_v2';
@@ -283,10 +281,12 @@
       let base=file.name.replace(/\.pdf$/i,''); if(FILENAME_REPLACE_UNDERSCORE_TO_SLASH) base=base.replace('_','/');
 
       let issuedDate=null, locationObj=null, issuerName=null;
-      try{ const text=await readPdfTextFromFile(file);
-        issuedDate=parseSentDate(text);
-        locationObj=parseLocation(text);
-        issuerName=parseIssuer(text);
+      try{
+        const text=await readPdfTextFromFile(file);
+        // DATE ENTERED 優先 → Sent フォールバック
+        issuedDate = parseDateEntered(text) || parseSentDate(text);
+        locationObj = parseLocation(text);
+        issuerName  = parseIssuer(text);
         console.log('%c[p2r] parsed','color:#0b8',{issuedDate,issuerName,location:locationObj});
       }catch(e){ console.warn('[p2r] PDF parse skipped:', e.message); }
 
@@ -296,7 +296,11 @@
       subEl.value = lot>1?`${base} (#1/${lot})`:base;
 
       if(issuedDate){ const el=$(SELECTORS.issuedDate); if(el){ try{ el.value=issuedDate; el.dispatchEvent(new Event('change',{bubbles:true})); }catch{} } }
-      else{ const manual=prompt('Could not find "Sent:" date in the PDF. Enter Issued Date (YYYY-MM-DD) or leave blank:',''); if(manual){ const el=$(SELECTORS.issuedDate); if(el) el.value=manual; } }
+      else{
+        // DATE ENTEREDもSentも無い場合のみ手入力
+        const manual=prompt('Could not find date in the PDF. Enter Issued Date (YYYY-MM-DD) or leave blank:','');
+        if(manual){ const el=$(SELECTORS.issuedDate); if(el) el.value=manual; }
+      }
 
       if(issuerName){ const issuerEl=findIssuerField(document); if(issuerEl){ try{ issuerEl.value=issuerName; issuerEl.dispatchEvent(new Event('input',{bubbles:true})); }catch{} } }
 
