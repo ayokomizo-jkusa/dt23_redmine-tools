@@ -1,10 +1,10 @@
 /* Redmine helper (no-API)
  * - Subject from PDF filename (optionally "_"->"/")
- * - Issued Date <- "DATE ENTERED:" (MM/DD/YY or MM/DD/YYYY) else fallback to "Sent:" (YYYY-MM-DD)
+ * - Issued Date <- "DATE ENTERED:" (MM/DD/YY or MM/DD/YYYY) else fallback to "Sent:" → (YYYY-MM-DD)
  * - Issuer      <- "NAME:" (raw text)  -> #issue_custom_field_values_16
  * - Location    <- "LOCATION:" (supports code-only like "058") -> #issue_custom_field_values_25
- * - Attachment  <- attach PDF to QRT field first (by label "QRT"), fallback to Files area
- * - LOT-by-LOT: fill #1 in current tab, then open next tabs on button clicks
+ * - Attachment  <- attach PDF to QRT field first (label contains "QRT"), fallback to Files area
+ * - LOT-by-LOT  <- default LOT QTY from "LOT QTY:" in PDF (fallback=1)
  * UI: English
  */
 (function () {
@@ -14,7 +14,7 @@
     /* ===== CONFIG ===== */
     const SELECTORS = {
       subject:    '#issue_subject',
-      issuedDate: '#issue_custom_field_values_15', // Issued Date (Redmine側フィールド)
+      issuedDate: '#issue_custom_field_values_15', // Issued Date (Redmine field)
       location:   '#issue_custom_field_values_25', // Location
       issuer:     '#issue_custom_field_values_16'  // Issuer
     };
@@ -56,6 +56,7 @@
       }
     };
 
+    // Set <select> or <input> value; tries option text/value (exact→partial)
     function setSelectByTextOrValue(el, targetText) {
       if (!el) return false;
       const tgt = String(targetText ?? '').trim();
@@ -220,6 +221,15 @@
       return null;
     }
 
+    // LOT QTY
+    function parseLotQty(pdfText) {
+      // 例: "LOT QTY: 3" / "LOT QTY : 2 EA" などを想定
+      const m = pdfText.match(/^\s*LOT\s+QTY\s*:?\s*(\d+)/im);
+      if (!m) return null;
+      const n = parseInt(m[1], 10);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    }
+
     /* ===== Batch panel ===== */
     const PANEL_ID='p2r_panel_v2'; const STASH_KEY='p2r_stash_v2';
     const getStash=()=>{try{return JSON.parse(localStorage.getItem(STASH_KEY)||'null')}catch{return null}};
@@ -280,24 +290,26 @@
 
       let base=file.name.replace(/\.pdf$/i,''); if(FILENAME_REPLACE_UNDERSCORE_TO_SLASH) base=base.replace('_','/');
 
-      let issuedDate=null, locationObj=null, issuerName=null;
+      let issuedDate=null, locationObj=null, issuerName=null, lotFromPdf=null;
       try{
         const text=await readPdfTextFromFile(file);
         // DATE ENTERED 優先 → Sent フォールバック
         issuedDate = parseDateEntered(text) || parseSentDate(text);
         locationObj = parseLocation(text);
         issuerName  = parseIssuer(text);
-        console.log('%c[p2r] parsed','color:#0b8',{issuedDate,issuerName,location:locationObj});
+        lotFromPdf  = parseLotQty(text);
+        console.log('%c[p2r] parsed','color:#0b8',{issuedDate,issuerName,location:locationObj,lotFromPdf});
       }catch(e){ console.warn('[p2r] PDF parse skipped:', e.message); }
 
-      let lot=parseInt(prompt('Enter LOT QTY (default=1)','1')||'1',10); if(!(lot>0)) lot=1;
+      // LOT デフォルト = PDF値 or 1
+      let lot = parseInt(prompt('Enter LOT QTY', lotFromPdf ? String(lotFromPdf) : '1') || (lotFromPdf || 1), 10);
+      if (!(lot > 0)) lot = 1;
 
       const subEl=$(SELECTORS.subject); if(!subEl){ alert('Subject field not found.'); return; }
       subEl.value = lot>1?`${base} (#1/${lot})`:base;
 
       if(issuedDate){ const el=$(SELECTORS.issuedDate); if(el){ try{ el.value=issuedDate; el.dispatchEvent(new Event('change',{bubbles:true})); }catch{} } }
       else{
-        // DATE ENTEREDもSentも無い場合のみ手入力
         const manual=prompt('Could not find date in the PDF. Enter Issued Date (YYYY-MM-DD) or leave blank:','');
         if(manual){ const el=$(SELECTORS.issuedDate); if(el) el.value=manual; }
       }
